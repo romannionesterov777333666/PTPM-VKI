@@ -4,41 +4,61 @@ import os
 import re
 import hashlib
 
+
 # ---------------------------------------------------------------------------
-# 1. НАСТРОЙКА ЛОГГЕРА (сквозное логирование в консоль и в файл)
+# 1. НАСТРОЙКА ЛОГГЕРА (гарантированная запись в файл и консоль)
 # ---------------------------------------------------------------------------
-LOG_DIR = "logs"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_DIR = os.path.join(BASE_DIR, "logs")
 LOG_FILE = os.path.join(LOG_DIR, "file_txt.log")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 log_format = "%(asctime)s | [%(levelname)-7s] | %(message)s"
 date_format = "%Y-%m-%d %H:%M:%S"
 
+# Убираем возможные старые handlers, чтобы basicConfig точно сработал
+for h in logging.root.handlers[:]:
+    logging.root.removeHandler(h)
+
+file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8", mode="a")
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(logging.Formatter(log_format, datefmt=date_format))
+
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setLevel(logging.DEBUG)
+console_handler.setFormatter(logging.Formatter(log_format, datefmt=date_format))
+
 logging.basicConfig(
     level=logging.DEBUG,
     format=log_format,
     datefmt=date_format,
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-    ],
+    handlers=[console_handler, file_handler],
+    force=True,
 )
 
 logger = logging.getLogger(__name__)
+
+# Проверка, что запись в файл реально работает
+print(f"[INIT] Лог-файл: {LOG_FILE}")
+print(f"[INIT] Файл существует: {os.path.exists(LOG_FILE)}")
+
 logger.info("Логгер успешно сконфигурирован")
 logger.info("Приложение запущено")
+
+
+def _flush_handlers():
+    """Сбрасывает буферы всех обработчиков — данные сразу идут на диск."""
+    for h in logging.root.handlers:
+        try:
+            h.flush()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
 # 2. МАСКИРОВАНИЕ ПАРОЛЕЙ (Вариант 2)
 # ---------------------------------------------------------------------------
 def mask_secret(secret: str) -> str:
-    """
-    Маскирует секрет (пароль) так, чтобы:
-      * одинаковые пароли давали одинаковую маску;
-      * разные пароли давали разные маски;
-      * исходное значение нельзя было восстановить.
-    """
     if secret is None:
         return "<none>"
     digest = hashlib.sha256(secret.encode("utf-8")).hexdigest()
@@ -46,20 +66,19 @@ def mask_secret(secret: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 3. ПРЕДУСТАНОВЛЕННЫЙ ЧЁРНЫЙ СПИСОК ЛОГИНОВ
+# 3. ЧЁРНЫЙ СПИСОК ЛОГИНОВ
 # ---------------------------------------------------------------------------
 BLACKLIST = {
     "admin", "root", "administrator", "user", "guest",
-    "test", "superuser", "moderator", "support", "system",
+    "test", "superuser", "moderator", "support", "system","admin@gmail.com"
 }
 
 # ---------------------------------------------------------------------------
 # 4. РЕГУЛЯРНЫЕ ВЫРАЖЕНИЯ
+#    PHONE_RE принимает форматы: +x-xxx-xxx-xxxx и +x-xxx-xxx-xx-xx
 # ---------------------------------------------------------------------------
-PHONE_RE = re.compile(r"^\+\d{1,3}-\d{3}-\d{3}-\d{4}$")
-EMAIL_RE = re.compile(
-    r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$"
-)
+PHONE_RE = re.compile(r"^\+\d{1,3}-\d{3}-\d{3}-(?:\d{4}|\d{2}-\d{2})$")
+EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 PLAIN_LOGIN_RE = re.compile(r"^[A-Za-z0-9_]{5,}$")
 
 PASSWORD_ALLOWED_RE = re.compile(r"^[А-Яа-яЁё0-9!@#$%^&*()_\-+=\[\]{};:'\",.<>/?\\|`~]+$")
@@ -70,10 +89,9 @@ HAS_SPECIAL   = re.compile(r"[!@#$%^&*()_\-+=\[\]{};:'\",.<>/?\\|`~]")
 
 
 # ---------------------------------------------------------------------------
-# 5. КЛАСС ОШИБОК ВАЛИДАЦИИ
+# 5. ОШИБКА ВАЛИДАЦИИ
 # ---------------------------------------------------------------------------
 class ValidationError(Exception):
-    """Исключение с человекочитаемым сообщением об ошибке валидации."""
     pass
 
 
@@ -146,10 +164,6 @@ def validate_confirmation(password: str, confirm: str) -> None:
 
 
 def validate_credentials(login: str, password: str, confirm: str):
-    """
-    Комплексная валидация учётных данных.
-    Возвращает кортеж (result: bool, message: str).
-    """
     try:
         validate_login(login)
         validate_password(password)
@@ -162,6 +176,7 @@ def validate_credentials(login: str, password: str, confirm: str):
             mask_secret(password),
             mask_secret(confirm),
         )
+        _flush_handlers()
         return True, ""
 
     except ValidationError as ex:
@@ -174,6 +189,7 @@ def validate_credentials(login: str, password: str, confirm: str):
             str(ex),
         )
         logger.exception("Трассировка стека исключения валидации:")
+        _flush_handlers()
         return False, str(ex)
 
     except Exception as ex:
@@ -185,17 +201,17 @@ def validate_credentials(login: str, password: str, confirm: str):
             str(ex),
         )
         logger.exception("Необработанное исключение:")
+        _flush_handlers()
         return False, "Внутренняя ошибка сервера."
 
 
 # ---------------------------------------------------------------------------
-# 7. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ВВОДА
+# 7. ВВОД
 # ---------------------------------------------------------------------------
 EXIT_COMMANDS = {"exit", "quit", "q", "выход"}
 
 
 def ask(prompt: str) -> str:
-    """Безопасный ввод с обработкой Ctrl+C / Ctrl+D."""
     try:
         return input(prompt)
     except (EOFError, KeyboardInterrupt):
@@ -204,7 +220,7 @@ def ask(prompt: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 8. ТОЧКА ВХОДА — БЕСКОНЕЧНЫЙ ЦИКЛ
+# 8. БЕСКОНЕЧНЫЙ ЦИКЛ
 # ---------------------------------------------------------------------------
 def main():
     print("=" * 70)
@@ -217,48 +233,50 @@ def main():
         iteration += 1
         logger.info("=" * 70)
         logger.info("Начало итерации №%d", iteration)
+        _flush_handlers()
 
-        # --- Ввод логина ---
         try:
             login = ask("Логин: ").strip()
         except (EOFError, KeyboardInterrupt):
             logger.warning("Завершение работы: прерывание ввода логина.")
+            _flush_handlers()
             break
 
         if login.lower() in EXIT_COMMANDS:
             logger.info("Пользователь запросил выход (команда: %r).", login)
+            _flush_handlers()
             print("Завершение работы. До свидания!")
             break
 
-        # --- Ввод пароля ---
         try:
             password = ask("Пароль: ")
         except (EOFError, KeyboardInterrupt):
             logger.warning("Завершение работы: прерывание ввода пароля.")
+            _flush_handlers()
             break
 
         if password.lower() in EXIT_COMMANDS:
             logger.info("Пользователь запросил выход (пароль-команда: %r).", password)
+            _flush_handlers()
             print("Завершение работы. До свидания!")
             break
 
-        # --- Ввод подтверждения ---
         try:
             confirm = ask("Подтверждение пароля: ")
         except (EOFError, KeyboardInterrupt):
             logger.warning("Завершение работы: прерывание ввода подтверждения.")
+            _flush_handlers()
             break
 
-        # --- Валидация ---
         result, message = validate_credentials(login, password, confirm)
 
-        # --- Вывод результата ---
         print("-" * 70)
         print(f"Результат: {result}")
         print(f"Сообщение: {message if message else '(успех)'}")
         print("-" * 70)
 
     logger.info("Приложение завершило работу. Всего итераций: %d", iteration)
+    _flush_handlers()
 
 
 if __name__ == "__main__":
@@ -267,4 +285,5 @@ if __name__ == "__main__":
     except Exception:
         logger.critical("Падение приложения в main():")
         logger.exception("Traceback:")
+        _flush_handlers()
         raise
